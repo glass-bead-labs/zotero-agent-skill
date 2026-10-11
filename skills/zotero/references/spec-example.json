@@ -1,0 +1,73 @@
+{
+  "library": "CogSec",
+  "collection": "Risks in Learning",
+  "tags": [
+    "CogSec G1 lit review",
+    "needs review"
+  ],
+  "entries": [
+    {
+      "id": "arXiv:2506.08872",
+      "claimed": {
+        "title": "Your Brain on ChatGPT: Accumulation of Cognitive Debt when Using an AI Assistant for Essay Writing Task",
+        "authors": "Kosmyna, N., et al.",
+        "year": 2025
+      },
+      "tags": [
+        "caveat: preprint"
+      ],
+      "notes": [
+        "<h1>Opus lit review: annotation (LLM-generated, unreviewed)</h1><p>EEG across LLM / search / brain-only conditions ...</p><p><small>Citation as written in the doc: Kosmyna, N., et al. (2025). ...</small></p>"
+      ],
+      "subcollection": [
+        "Cognitive offloading: evidence & harms"
+      ]
+    },
+    {
+      "id": "10.1016/j.cedpsych.2011.05.002",
+      "claimed": {
+        "title": "Agency as a Goal of Education.",
+        "authors": "Reeve, J., & Tseng, C.-M.",
+        "year": 2011
+      },
+      "accept_mismatch": "source title is wrong; authors and year match the resolved record",
+      "notes": []
+    },
+    {
+      "id": "10.1145/3772363.3799386",
+      "pdf": "https://example.org/optional-direct-pdf-url.pdf",
+      "notes": [
+        "<p>Why this item is here.</p>"
+      ]
+    },
+    {
+      "manual": {
+        "itemType": "journalArticle",
+        "title": "Title exactly as the source gave it",
+        "creators": [
+          {
+            "creatorType": "author",
+            "firstName": "A.",
+            "lastName": "Name"
+          }
+        ],
+        "date": "2020",
+        "publicationTitle": "Journal as given"
+      },
+      "user_affirmed": "Dav, chat 2026-10-11: \"yes, add the LLM-supplied metadata for this one, it has no DOI\"",
+      "claimed": {
+        "title": "Title exactly as the source gave it",
+        "authors": "Name, A.",
+        "year": 2020
+      },
+      "tags": [
+        "needs review"
+      ],
+      "notes": []
+    }
+  ],
+  "standalone_notes": [
+    "<h1>Collection-level note</h1><p>Provenance, research gaps, synthesis, items held back for a human decision ...</p>"
+  ],
+  "tag_type": "manual"
+}
