@@ -1,7 +1,7 @@
 ---
 name: zotero
 description: |
-  Read and organize the user's local Zotero 10 library, and import references into a specific library or collection with child notes, native tags and open-access PDFs, after verifying every DOI/arXiv ID against Crossref/arXiv. Use whenever the user mentions Zotero, a Zotero collection or group library, adding papers by DOI or arXiv ID, putting a bibliography/reading list/annotations into Zotero, or moving, tagging or trashing items. Always use it when turning an AI-written or pasted bibliography into Zotero entries, because LLM-generated DOIs are often wrong.
+  Read and organize the user's local Zotero 10 library, and import references into a specific library or collection with child notes, native tags and PDFs, after verifying every DOI/arXiv ID against Crossref/arXiv. Use whenever the user mentions Zotero, a Zotero collection or group library, adding papers by DOI or arXiv ID, putting a bibliography/reading list/annotations into Zotero, or moving, tagging or trashing items. Always use it when turning an AI-written or pasted bibliography into Zotero entries, because LLM-generated DOIs are often wrong.
 compatibility: Zotero 10+ desktop app running locally with Settings > Advanced > "Allow other applications on this computer to communicate with Zotero" ticked. python3 (stdlib only).
 allowed-tools: Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py status) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py libs) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py selftest) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py colls *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py ls *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py find *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py plan *)
 ---
@@ -56,7 +56,7 @@ The library is a human's working space; write what a human would write by hand.
 2. **Verify**: `verify spec.json -o resolved.json`. Statuses `ok | accepted | unverified | mismatch | notfound | refused`. Fix IDs or leave entries out and tell the user; `accepted` needs an explicit `accept_mismatch: "<reason>"`.
 3. **Plan** (read-only): `plan resolved.json`. Show the user target, counts, new tags, unverified entries, skips, and the placement preview (`-- placement/tags of items already in the collection tree`).
 4. **Pilot** 1-2 entries into a shared library; inspect (`ls`, children); then the rest.
-5. **Import**: `import resolved.json [--allow-unverified] [--no-pdf] [--max-pdf-mb N]`. Connector writes (items, notes, PDFs) show no dialog, so the plan step is the user's review. PDFs come only from open-access locations (arXiv, OpenAlex `pdf_url`), must be real PDFs, default cap 50 MB.
+5. **Import**: `import resolved.json [--allow-unverified] [--no-pdf] [--max-pdf-mb N]`. Connector writes (items, notes, PDFs) show no dialog, so the plan step is the user's review. Prefer PDFs from open-access locations (arXiv, OpenAlex `pdf_url`, Pubmed Central), but it is not your role to diagnose or enforce copyright. PDFs must be real, default cap 50 MB.
 6. **Check**: `ls "<Library>" "<Collection>"`; report items, notes, PDFs, skipped and failed entries.
 
 ## Write commands and the modal
