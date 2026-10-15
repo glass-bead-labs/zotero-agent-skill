@@ -5,12 +5,14 @@ Stdlib only. Talks to Zotero on 127.0.0.1:23119:
   * /api/...        local API; reads are open, writes need a per-request approval click in Zotero
   * /connector/...  browser-connector endpoints; `import` uses these (items, child notes, PDFs; no dialog)
 
-Read-only (GET to 127.0.0.1 only; enforced at runtime, see READ_ONLY):
-    status | libs | colls LIB | ls LIB [COLL] | find LIB QUERY | plan RESOLVED | selftest
+Read-only (GET to 127.0.0.1 only; enforced at runtime, see GUARD):
+    status | libs | colls LIB | ls LIB [COLL] | find LIB QUERY | plan SPEC | where [SPEC] | selftest
+Network read, one local file (GET only, to Zotero + Crossref/arXiv/OpenAlex; enforced at runtime, see GUARD):
+    verify SPEC        resolves identifiers; writes one output file (location: resolved_for()); never touches
+                       Zotero. plan/import/organize take the same SPEC; `where SPEC` prints the location.
 Not read-only:
-    verify SPEC        queries Crossref/arXiv/OpenAlex; writes only the -o file; never touches Zotero
-    import RESOLVED    writes items/notes/PDFs through the connector (no dialog), then runs `organize`
-    organize RESOLVED  regular tags + subcollection placement (local-API writes: one dialog to create
+    import SPEC        writes items/notes/PDFs through the connector (no dialog), then runs `organize`
+    organize SPEC      regular tags + subcollection placement (local-API writes: one dialog to create
                        subcollections, then one per 50 items); idempotent, also fixes earlier imports
     trash | write      local-API writes (one approval dialog per request)
 
@@ -18,7 +20,7 @@ Design rule: the model never types bibliographic metadata. It supplies identifie
 (DOI / arXiv ID); metadata comes from Crossref / arXiv and is compared with what the
 source document claimed before anything is written.
 """
-import argparse, difflib, html, json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, difflib, hashlib, html, json, os, re, stat, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
 import xml.etree.ElementTree as ET
 
 HOST = os.environ.get("ZOTERO_HOST", "http://127.0.0.1:23119")
@@ -27,40 +29,79 @@ SIM_OK = 0.85
 
 
 # ---------------------------------------------------------------- http helpers
-READ_ONLY = False  # set in main() for the read-only commands; makes any non-GET or off-host request fatal
-READ_ONLY_CMDS = {"status", "libs", "colls", "ls", "find", "plan", "selftest"}
+# GUARD is None (write commands: unguarded) or a tuple of URL prefixes; set in main(). While set, http() allows
+# only GET to those prefixes (redirects included) and anything else is fatal.
+GUARD = None
+LOCAL_ONLY = (HOST + "/",)
+REMOTE_READ = LOCAL_ONLY + ("https://api.crossref.org/", "https://export.arxiv.org/", "https://api.openalex.org/")
+READ_ONLY_CMDS = {"status", "libs", "colls", "ls", "find", "plan", "where", "selftest"}  # GUARD = LOCAL_ONLY
+VERIFY_CMDS = {"verify"}                                                                  # GUARD = REMOTE_READ
 
 
-def read_only_violation(url, data, method):
-    """None if (url, data, method) is a GET to the local Zotero server, else an error string."""
+def read_only_violation(url, data, method, allowed=LOCAL_ONLY):
+    """None if (url, data, method) is a GET to one of the `allowed` URL prefixes, else an error string."""
     verb = method or ("POST" if data is not None else "GET")
-    if verb != "GET" or not url.startswith(HOST + "/"):
-        return "BUG: read-only command attempted %s %s" % (verb, url)
+    if verb != "GET" or not url.startswith(allowed):
+        if allowed == LOCAL_ONLY:
+            return "BUG: read-only command attempted %s %s" % (verb, url)
+        return "BUG: verify attempted %s %s (only GET to Zotero, Crossref, arXiv, OpenAlex is allowed)" % (verb, url)
     return None
+
+
+class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
+    """Re-applies the guard to redirect targets, so an allowed host cannot bounce a request elsewhere."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        err = read_only_violation(newurl, None, "GET", GUARD or LOCAL_ONLY)
+        if err:
+            sys.exit(err)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def cmd_selftest(a):
     """No Zotero needed. Proves the guard that protects the read-only commands."""
     h = HOST
-    cases = [("GET local api", (h + "/api/users/0/groups", None, None), False),
-             ("GET connector ping", (h + "/connector/ping", None, None), False),
-             ("POST (implicit, data given)", (h + "/api/groups/1/items", b"{}", None), True),
-             ("PATCH", (h + "/api/groups/1/items/ABC", None, "PATCH"), True),
-             ("DELETE", (h + "/api/groups/1/items/ABC", None, "DELETE"), True),
-             ("connector POST", (h + "/connector/saveItems", b"{}", "POST"), True),
-             ("GET off-host (Crossref)", ("https://api.crossref.org/works/10.1/x", None, None), True)]
+    cr, ax = "https://api.crossref.org/works/10.1/x", "https://export.arxiv.org/api/query?id_list=1"
+    # (label, (url, data, method), must_block, allowed prefixes)
+    cases = [("GET local api", (h + "/api/users/0/groups", None, None), False, LOCAL_ONLY),
+             ("GET connector ping", (h + "/connector/ping", None, None), False, LOCAL_ONLY),
+             ("POST (implicit, data given)", (h + "/api/groups/1/items", b"{}", None), True, LOCAL_ONLY),
+             ("PATCH", (h + "/api/groups/1/items/ABC", None, "PATCH"), True, LOCAL_ONLY),
+             ("DELETE", (h + "/api/groups/1/items/ABC", None, "DELETE"), True, LOCAL_ONLY),
+             ("connector POST", (h + "/connector/saveItems", b"{}", "POST"), True, LOCAL_ONLY),
+             ("GET off-host (Crossref)", (cr, None, None), True, LOCAL_ONLY),
+             ("verify: GET Crossref", (cr, None, None), False, REMOTE_READ),
+             ("verify: GET arXiv", (ax, None, None), False, REMOTE_READ),
+             ("verify: GET local ping", (h + "/connector/ping", None, None), False, REMOTE_READ),
+             ("verify: POST Crossref", (cr, b"{}", "POST"), True, REMOTE_READ),
+             ("verify: POST local connector", (h + "/connector/saveItems", b"{}", "POST"), True, REMOTE_READ),
+             ("verify: GET other host", ("https://example.org/x", None, None), True, REMOTE_READ),
+             ("verify: lookalike host", ("https://api.crossref.org.evil.example/x", None, None), True, REMOTE_READ),
+             ("verify: userinfo trick", ("https://api.crossref.org@evil.example/x", None, None), True, REMOTE_READ),
+             ("verify: plain http", ("http://api.crossref.org/works/1", None, None), True, REMOTE_READ)]
     bad = 0
-    for label, args, must_block in cases:
-        blocked = read_only_violation(*args) is not None
+    for label, args, must_block, allowed in cases:
+        blocked = read_only_violation(*args, allowed=allowed) is not None
         bad += blocked != must_block
         print("%-30s %s %s" % (label, "BLOCKED" if blocked else "allowed", "ok" if blocked == must_block else "FAIL"))
+    # a redirect from an allowed host to an off-host URL must be refused
+    global GUARD
+    saved, GUARD = GUARD, REMOTE_READ
+    try:
+        _GuardedRedirect().redirect_request(urllib.request.Request(cr), None, 302, "Found", {}, "https://example.org/x")
+        print("%-30s allowed FAIL" % "verify: redirect off-host")
+        bad += 1
+    except SystemExit:
+        print("%-30s BLOCKED ok" % "verify: redirect off-host")
+    finally:
+        GUARD = saved
     print("read-only commands:", ", ".join(sorted(READ_ONLY_CMDS)))
+    print("network-read commands:", ", ".join(sorted(VERIFY_CMDS)))
     sys.exit(1 if bad else 0)
 
 
 def http(url, data=None, headers=None, method=None, timeout=60, raw=False):
-    if READ_ONLY:
-        err = read_only_violation(url, data, method)
+    if GUARD:
+        err = read_only_violation(url, data, method, GUARD)
         if err:
             sys.exit(err)
     h = dict(UA)
@@ -68,7 +109,7 @@ def http(url, data=None, headers=None, method=None, timeout=60, raw=False):
     req = urllib.request.Request(url, data=data, headers=h, method=method)
     for attempt in range(4):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with (urllib.request.build_opener(_GuardedRedirect).open if GUARD else urllib.request.urlopen)(req, timeout=timeout) as r:
                 body = r.read()
                 return (body, r.headers) if raw else body
         except urllib.error.HTTPError as e:
@@ -223,7 +264,6 @@ def arxiv(aid):
         root = ET.fromstring(http("https://export.arxiv.org/api/query?id_list=" + aid))
     except urllib.error.HTTPError as e:
         return None, "arXiv HTTP %d" % e.code
-    time.sleep(3)  # arXiv API etiquette
     e = root.find("a:entry", ns)
     if e is None or e.find("a:title", ns) is None or "Error" in (e.find("a:title", ns).text or ""):
         return None, "arXiv: not found"
@@ -252,7 +292,8 @@ def pdf_candidates(entry_id, doi):
         return []
     try:
         w = json.loads(http("https://api.openalex.org/works/https://doi.org/%s?select=best_oa_location,locations" % urllib.parse.quote(doi)))
-    except Exception:
+    except Exception as ex:
+        print("warning: OpenAlex lookup failed for %s (%s); no PDF candidates from it" % (doi, ex), file=sys.stderr)
         return []
     urls = []
     for loc in [w.get("best_oa_location") or {}] + (w.get("locations") or []):
@@ -392,8 +433,59 @@ def cmd_write(a):
         print("  failed %s: %s" % (k, v))
 
 
+def run_dir(create=False):
+    """The directory for verify output: <system temp dir>/zotero-skill. The temp dir honours $TMPDIR.
+    The directory is private (mode 0700, owned by us, never a symlink), so the fixed name is safe even in a
+    shared /tmp. Outputs for different specs are told apart by the spec path (see resolved_for)."""
+    d = os.path.join(tempfile.gettempdir(), "zotero-skill")
+    if create:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        st = os.lstat(d)
+        if not stat.S_ISDIR(st.st_mode) or (hasattr(os, "getuid") and st.st_uid != os.getuid()):
+            sys.exit("refusing to use %s: not a directory owned by you" % d)
+        os.chmod(d, 0o700)
+    return d
+
+
+def resolved_for(spec_arg, create=False):
+    """The single definition of where a spec's verify output lives:
+    <run_dir()>/<spec file stem>-<8 hex of the spec's real path>.resolved.json.
+    It depends on the spec path alone, so verify, plan, import, organize and where agree without a second
+    file name, and two different specs can never share an output file. create=True makes the directory."""
+    spec_path = os.path.realpath(spec_arg)
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.splitext(os.path.basename(spec_path))[0])[:60] or "spec"
+    return os.path.join(run_dir(create), "%s-%s.resolved.json" % (stem, hashlib.sha1(spec_path.encode()).hexdigest()[:8]))
+
+
+def load_resolved(spec_arg):
+    p = resolved_for(spec_arg)
+    if not os.path.isfile(p):
+        sys.exit("no verify output for %s (expected %s); run `verify %s` first" % (spec_arg, p, spec_arg))
+    return json.load(open(p))
+
+
+IMPORTABLE = ("ok", "accepted", "unverified")  # verify statuses that import / organize act on
+
+
+def importable_entries(spec):
+    return [e for e in spec["entries"] if e["status"] in IMPORTABLE]
+
+
+def cmd_where(a):
+    d = run_dir()
+    if a.spec:
+        p = resolved_for(a.spec)
+        print(p)
+        sys.exit(0 if os.path.isfile(p) else 1)
+    print(d)
+    for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        st = os.stat(os.path.join(d, n))
+        print("  %-50s %8d bytes  %s" % (n, st.st_size, time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))))
+
+
 def cmd_verify(a):
     spec = json.load(open(a.spec))
+    out_path = resolved_for(a.spec, create=True)
     res = {"library": spec["library"], "collection": spec.get("collection"), "tags": spec.get("tags", []),
            "tag_type": spec.get("tag_type", "manual"),
            "standalone_notes": spec.get("standalone_notes", []), "entries": []}
@@ -430,10 +522,10 @@ def cmd_verify(a):
                 "unverified": "UNVERIF", "refused": "REFUSED"}[r["status"]]
         print("%-8s %-34s sim=%-4s pdf=%-3s %s | %s" % (flag, ident, r.get("title_sim"), len(r.get("pdf_urls", [])),
               (r.get("item") or {}).get("title", "")[:48], r.get("detail", "")))
-        time.sleep(0.2)
-    json.dump(res, open(a.out, "w"), indent=1, ensure_ascii=False)
+    with open(out_path, "w") as f:
+        json.dump(res, f, indent=1, ensure_ascii=False)
     n = {k: sum(1 for x in res["entries"] if x["status"] == k) for k in ("ok", "accepted", "unverified", "mismatch", "notfound", "refused")}
-    print("\n%s\nwrote %s" % (n, a.out))
+    print("\n%s\nwrote %s" % (n, out_path))
 
 
 def fetch_pdf(urls):
@@ -464,6 +556,13 @@ def tag_objs(names, kind):
     return out
 
 
+def wanted_names(spec, e):
+    names = list(spec.get("tags", [])) + list(e.get("tags", []))
+    if e.get("status") == "unverified":
+        names.append("unverified metadata")
+    return names
+
+
 def build_import(spec, allow_unverified):
     """Pure planning: reads Zotero (GET only) and returns what `import` would send."""
     lp = lib_path(spec["library"])
@@ -476,16 +575,15 @@ def build_import(spec, allow_unverified):
         st = e["status"]
         if st == "unverified" and not allow_unverified:
             skipped.append((label, "unverified metadata: needs --allow-unverified")); continue
-        if st not in ("ok", "accepted", "unverified"):
+        if st not in IMPORTABLE:
             skipped.append((label, st)); continue
         item = e["item"]
         doi = item.get("DOI", "").lower()
         if (doi and doi in ids) or (e.get("id") and e["id"].lower() in ids) or (st == "unverified" and norm(item["title"]) in titles):
             skipped.append((label, "already in library")); continue
-        names = list(spec.get("tags", [])) + list(e.get("tags", []))
+        names = wanted_names(spec, e)
         notes = list(e.get("notes", []))
         if st == "unverified":
-            names.append("unverified metadata")
             notes.append("<h3>Unverified metadata</h3><p>The fields of this record were not resolved from Crossref/arXiv; "
                          "they were supplied by an LLM or copied from a source citation, and imported because the user "
                          "explicitly approved it:</p><blockquote>%s</blockquote><p>Check against the paper, then remove "
@@ -526,13 +624,6 @@ def describe(spec, b):
         print("note: import will follow with ONE Zotero approval dialog per 50 items to set these as regular tags")
     for s_ in b["skipped"]:
         print("  skip", *s_)
-
-
-def wanted_names(spec, e):
-    names = list(spec.get("tags", [])) + list(e.get("tags", []))
-    if e.get("status") == "unverified":
-        names.append("unverified metadata")
-    return names
 
 
 def subcolls_of(e):
@@ -649,21 +740,19 @@ def organize(spec, entries, note_htmls, dry=False):
 
 
 def cmd_organize(a):
-    spec = json.load(open(a.resolved))
-    ents = [e for e in spec["entries"] if e["status"] in ("ok", "accepted", "unverified")]
-    organize(spec, ents, spec.get("standalone_notes", []), dry=a.dry_run)
+    spec = load_resolved(a.spec)
+    organize(spec, importable_entries(spec), spec.get("standalone_notes", []), dry=a.dry_run)
 
 
 def cmd_plan(a):
-    spec = json.load(open(a.resolved))
+    spec = load_resolved(a.spec)
     describe(spec, build_import(spec, True))
-    ents = [e for e in spec["entries"] if e["status"] in ("ok", "accepted", "unverified")]
     print("-- placement/tags of items already in the collection tree:")
-    organize(spec, ents, spec.get("standalone_notes", []), dry=True)
+    organize(spec, importable_entries(spec), spec.get("standalone_notes", []), dry=True)
 
 
 def cmd_import(a):
-    spec = json.load(open(a.resolved))
+    spec = load_resolved(a.spec)
     b = build_import(spec, a.allow_unverified)
     target, tname = connector_target(spec["library"], spec.get("collection"))
     describe(spec, b)
@@ -714,28 +803,31 @@ def main():
     sp.add_parser("status").set_defaults(f=cmd_status)
     sp.add_parser("selftest", help="verify the read-only guard (needs no Zotero)").set_defaults(f=cmd_selftest)
     sp.add_parser("libs").set_defaults(f=cmd_libs)
+    s = sp.add_parser("where", help="print the directory for verify output (and its files), or the output path for SPEC")
+    s.add_argument("spec", nargs="?"); s.set_defaults(f=cmd_where)
     s = sp.add_parser("colls"); s.add_argument("lib"); s.set_defaults(f=cmd_colls)
     s = sp.add_parser("ls"); s.add_argument("lib"); s.add_argument("coll", nargs="?"); s.set_defaults(f=cmd_ls)
     s = sp.add_parser("find"); s.add_argument("lib"); s.add_argument("query"); s.set_defaults(f=cmd_find)
-    s = sp.add_parser("verify"); s.add_argument("spec"); s.add_argument("-o", "--out", default="resolved.json")
+    s = sp.add_parser("verify", help="resolve IDs via Crossref/arXiv; output goes to a private temp dir (see `where SPEC`)")
+    s.add_argument("spec")
     s.add_argument("--no-pdf", action="store_true"); s.set_defaults(f=cmd_verify)
-    s = sp.add_parser("plan", help="READ-ONLY: show what import would create; writes nothing"); s.add_argument("resolved"); s.set_defaults(f=cmd_plan)
-    s = sp.add_parser("import", help="write items/notes/PDFs via the connector (no Zotero dialog)"); s.add_argument("resolved")
+    s = sp.add_parser("plan", help="READ-ONLY: show what import would create; writes nothing"); s.add_argument("spec"); s.set_defaults(f=cmd_plan)
+    s = sp.add_parser("import", help="write items/notes/PDFs via the connector (no Zotero dialog)"); s.add_argument("spec")
     s.add_argument("--allow-unverified", action="store_true", help="also import user-affirmed entries with unverified (manual) metadata")
     s.add_argument("--no-pdf", action="store_true"); s.add_argument("--max-pdf-mb", type=int, default=50)
     s.set_defaults(f=cmd_import)
     s = sp.add_parser("organize", help="set tags as regular tags and place items into subcollections for items already imported (local-API writes)")
-    s.add_argument("resolved"); s.add_argument("--dry-run", action="store_true", help="show the changes, write nothing")
+    s.add_argument("spec"); s.add_argument("--dry-run", action="store_true", help="show the changes, write nothing")
     s.set_defaults(f=cmd_organize)
     s = sp.add_parser("trash", help="move items to Zotero's trash (one approval dialog)"); s.add_argument("lib"); s.add_argument("keys", nargs="+"); s.set_defaults(f=cmd_trash)
     s = sp.add_parser("write", help="POST a JSON array of item (or --collections) objects via the local API (one approval dialog)"); s.add_argument("lib"); s.add_argument("json")
     s.add_argument("--collections", action="store_true", help="the objects are collections ({key, version, name, ...}), not items")
     s.set_defaults(f=cmd_write)
     a = p.parse_args()
-    global READ_ONLY
-    READ_ONLY = a.cmd in READ_ONLY_CMDS
-    if a.cmd == "selftest":
-        return cmd_selftest(a)
+    global GUARD
+    GUARD = LOCAL_ONLY if a.cmd in READ_ONLY_CMDS else REMOTE_READ if a.cmd in VERIFY_CMDS else None
+    if a.cmd in ("selftest", "where"):  # need no Zotero
+        return a.f(a)
     require_zotero10()
     a.f(a)
 
