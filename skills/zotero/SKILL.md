@@ -8,6 +8,8 @@ allowed-tools: Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py status) Bas
 
 # Zotero (10+, local API)
 
+**Scope.** This skill is not for doing research. It fetches from and updates Zotero. The assumption is that if you are entering new references, you have already identified them, outside the scope of this skill (ideally with a DOI or arXiv ID in hand). `verify` fetches the metadata from Crossref/arXiv and checks it matches the claim, and comes after identifying references.
+
 One stdlib-only CLI, `scripts/zotero.py`, against the running desktop app on `127.0.0.1:23119`. No API key, no cloud, no MCP. Run it as `python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py <command>` (if the variable is not expanded, use this skill's directory).
 
 ## Read-only commands (pre-approved in `allowed-tools`)
@@ -16,7 +18,7 @@ One stdlib-only CLI, `scripts/zotero.py`, against the running desktop app on `12
 
 They only issue **HTTP GET to `127.0.0.1:23119`** (`/connector/ping`, `/api/users/0/groups`, `/api/<lib>/collections`, `.../items`, `.../items/top`, `.../tags`) and, for `plan`, read the local JSON file named on the command line. They send no data anywhere else and create, modify or delete nothing in Zotero or on disk. `plan` is the dry run of `import`: it computes what `import` would send (new items, notes, tags, skipped duplicates) and stops.
 
-**Verify this yourself (three independent layers):**
+This safety is defended in depth:
 
 1. *Zotero's own docs.* The Local API page states reads need no authentication and that "write requests (Zotero 10+) require a local API key" the user grants in a Zotero confirmation dialog: <https://www.zotero.org/support/dev/web_api/v3/local_api>. Writes use POST/PUT/PATCH/DELETE (<https://www.zotero.org/support/dev/web_api/v3/write_requests>); GET is a *safe* method, i.e. read-only by definition (RFC 9110 section 9.2.1: <https://httpwg.org/specs/rfc9110.html#safe.methods>). So even a buggy GET cannot change the library: Zotero would reject a write without a key that the user approved.
 2. *The script's runtime guard.* Before any read-only command runs, `http()` in `scripts/zotero.py` is switched to `READ_ONLY`; any non-GET or non-`127.0.0.1` request exits with "BUG: read-only command attempted ...". Prove it without Zotero: `python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py selftest` (every write verb and off-host URL must print `BLOCKED ok`).
@@ -26,7 +28,9 @@ Deliberately **not** pre-approved: `verify` (queries Crossref/arXiv/OpenAlex wit
 
 ## The rule: never type bibliographic metadata
 
-Extract *identifiers* (DOI, `arXiv:ID`) and prose to attach. Crossref/arXiv supply the fields, and `verify` compares the source's claimed title/authors/year with what resolved. In the run that produced this skill, 15 of 29 references in an LLM-written bibliography had a wrong DOI, no ID, or an invented title, though nearly all the papers were real.
+An attempt should have been made to find a real ID (e.g., arXiv or Crossref `query.bibliographic`, title + author) prior to the work with Zotero described in this skill. If not, look for an ID so you can run `verify` (but don't repeat effort!).
+
+Extract *identifiers* (DOI, `arXiv:ID`) and prose to attach. `verify` compares the source's claimed title/authors/year with what resolved. In the run that produced this skill, 15 of 29 references in an LLM-written bibliography had a wrong DOI, no ID, or an invented title, though nearly all the papers were real.
 
 ### Escape hatch: no identifier exists
 
@@ -37,7 +41,9 @@ Some references have no DOI/arXiv ID. Do **not** invent one and do **not** silen
  "user_affirmed": "<the user's words, quoted, with date>", "claimed": {...}, "tags": [...]}
 ```
 
-`verify` marks it `unverified` (`refused` without `user_affirmed`). `plan` lists it prominently. `import` skips it unless `--allow-unverified` is passed, and then adds the tag `unverified metadata` plus a child note quoting the affirmation. Entries are de-duplicated by title. First try to find a real ID (Crossref `query.bibliographic`, title + author); use the hatch only after that fails, and list every such entry back to the user.
+`verify` marks it `unverified` (`refused` without `user_affirmed`). `plan` lists it prominently. `import` skips it unless `--allow-unverified` is passed, and then adds the tag `unverified metadata` plus a child note quoting the affirmation. Entries are de-duplicated by title.
+
+Use the hatch only for references with no identifier, and list every such entry back to the user
 
 ## Zotero-native, human-first
 
@@ -62,7 +68,7 @@ The library is a human's working space; write what a human would write by hand.
 ## Write commands and the modal
 
 | Command | Path | Zotero dialog |
-|---|---|---|
+| --- | --- | --- |
 | `import` | connector (items, notes, PDFs); then `organize` | none for the import; then as `organize` |
 | `organize RESOLVED [--dry-run]` | local API: create subcollections, set regular tags, move items | 1 to create subcollections + 1 per 50 items |
 | `trash LIB KEY...` | local API (`deleted:1`, reversible) | 1 per request |
