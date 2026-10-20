@@ -40,7 +40,7 @@ Two write paths on purpose.
 - *Connector* (`/connector/saveItems`, `updateSession`, `saveAttachment`; the browser-extension path): creates items with child notes, standalone notes and stored PDFs, and shows no dialog. It is the only way found to attach PDFs, and the only way to get notes in the same request. Because it is silent, the review gate is `plan` (a dry run), which the agent must show first.
 - *Local API writes* (tags, moves, renames, trash): each request needs a single-use key from `POST /api/local/authorize`, which pops a Zotero dialog. The user explicitly values this as a way to catch unintended changes, so the skill batches related edits into one request (max 50 objects) and tells the user how many dialogs to expect. Hard-won details: every write needs the `Zotero-Server-ID` header (seen on any response); keys are single-use; more than 5 dialog-triggering requests a minute get 429; a batch whose objects are all unchanged comes back `unchanged` but still costs a dialog.
 
-Read-only commands are pre-approved, and that claim is checkable. `status libs colls ls find plan where selftest` are in `allowed-tools`. So is `verify`, which is not read-only but is bounded by the same kind of runtime guard (GET only, to Zotero, Crossref, arXiv and OpenAlex) and writes one file under `$TMPDIR`. The argument (Zotero's docs, HTTP safe-method semantics, the guard, reading the code) is in `skills/zotero/references/read-only-safety.md`; `selftest` proves the guard without Zotero.
+Read-only commands are pre-approved, and that claim is checkable. `status libs colls ls find notes plan where selftest` are in `allowed-tools`. So is `verify`, which is not read-only but is bounded by the same kind of runtime guard (GET only, to Zotero, Crossref, arXiv and OpenAlex) and writes one file under `$TMPDIR`. The argument (Zotero's docs, HTTP safe-method semantics, the guard, reading the code) is in `skills/zotero/references/read-only-safety.md`; `selftest` proves the guard without Zotero.
 
 verify output goes to a temp directory, named from the spec. `verify` writes its result under `$TMPDIR` at a path computed from the spec's path, and `plan`, `import` and `organize` compute the same path. There is no output flag, so nothing can write to an arbitrary path, parallel agents with different specs cannot collide, and no repo needs a `.gitignore` entry.
 
@@ -63,7 +63,7 @@ Location. Source of truth is this repo; `~/.agents/skills/zotero` is a symlink t
 - The `Zotero < 10` branch of the version gate is untested (no older Zotero available).
 - Whether Claude Code's permission matcher expands `${CLAUDE_SKILL_DIR}` through the symlink chain in `allowed-tools` was not verified in-session; check that the pre-approved commands (read-only ones, `verify` and `where`) run without prompts in a fresh session.
 - Pipeline scripts used for the CogSec doc (doc text -> spec JSON, note retrofit) were one-offs and are not included; the shape is `references/spec-example.json`.
-- No `update` for existing item *fields*; `write` is the generic escape (array of `{key, version, ...}`).
+- No `update` for existing item *fields*; `write` is the generic escape (array of `{key, version, ...}`; objects without `key` create, e.g. a child note on an existing item, which has no dedupe).
 - Possible: PDF annotation import, Unpaywall (needs an email), per-entry target collections, a `find` that searches the whole subtree.
 
 ## References

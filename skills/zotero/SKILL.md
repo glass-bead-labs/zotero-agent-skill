@@ -3,7 +3,7 @@ name: zotero
 description: |
   Read and organize the user's local Zotero 10 library, and import references into a specific library or collection with child notes, native tags and PDFs, after verifying every DOI/arXiv ID against Crossref/arXiv. Use whenever the user mentions Zotero, a Zotero collection or group library, adding papers by DOI or arXiv ID, putting a bibliography/reading list/annotations into Zotero, or moving, tagging or trashing items. Always use it when turning an AI-written or pasted bibliography into Zotero entries, because LLM-generated DOIs are often wrong.
 compatibility: Zotero 10+ desktop app running locally with Settings > Advanced > "Allow other applications on this computer to communicate with Zotero" ticked. python3 (stdlib only).
-allowed-tools: Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py status) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py libs) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py selftest) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py colls *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py ls *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py find *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py path *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py plan *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py where) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py where *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py verify *)
+allowed-tools: Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py status) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py libs) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py selftest) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py colls *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py ls *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py find *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py notes *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py path *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py plan *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py where) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py where *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py verify *)
 ---
 
 # Zotero (10+, local API)
@@ -41,7 +41,7 @@ If something fails or looks odd (ID mapping, 429s, dedupe, subcollection lookups
 
 ### Read-only
 
-`status`, `libs`, `colls LIB`, `ls LIB [COLL]`, `find LIB QUERY`, `path LIB (ITEM... | --coll COLL)`, `plan SPEC`, `where [SPEC]`, `selftest`.
+`status`, `libs`, `colls LIB`, `ls LIB [COLL]`, `find LIB QUERY`, `notes LIB ITEM... [--full]`, `path LIB (ITEM... | --coll COLL)`, `plan SPEC`, `where [SPEC]`, `selftest`.
 
 They only issue HTTP GET to `127.0.0.1:23119` (`/connector/ping`, `/api/users/0/groups`, `/api/<lib>/collections`, `.../items`, `.../items/top`, `.../items/<KEY>/children`, `.../collections/<KEY>/items`, `.../items/<KEY>/file/view/url`, `.../tags`) and, for `plan`, read the verify output of the spec named on the command line (a file in the private temp directory; see the Verify step). They send no data anywhere else and create, modify or delete nothing in Zotero or on disk. `plan` is the dry run of `import`: it computes what `import` would send (new items, notes, tags, skipped duplicates) and stops. `where` only lists or prints paths in that temp directory.
 
@@ -76,6 +76,22 @@ The library is a human's working space; write what a human would write by hand.
 - Notes: the first line is the note's title in the item tree, so make it say what and where from ("Opus lit review: annotation (LLM-generated, unreviewed)"). One note per source annotation; LLM-written text is always labelled as such; keep a small footer with the citation as the source wrote it, and a line when an identifier was corrected. Document-level material goes in one standalone note in the collection.
 - Humans edit. Imported notes get edited. Matching of "already there" is fuzzy for notes and the `organize` retrofit skips notes whose `dateModified` differs from `dateAdded`. Never overwrite human edits.
 
+## Adding a note to an item already in Zotero
+
+`import` only creates notes together with a new item. For a reference that is already in the library, use `write` with a *new* object (no `key`, no `version`) instead of an update:
+
+```json
+[{"itemType": "note", "parentItem": "PARENTKEY", "note": "<h1>Title: what and where from (LLM-generated, unreviewed)</h1><p>...</p>", "tags": [{"tag": "needs review"}]}]
+```
+
+`write LIB note.json`. The parent is not modified; the note is a new child. Follow the note conventions under Zotero-native (first line is the title; label LLM text; HTML, so wrap plain prose in `<p>` and escape `<`, `&`). Tags on the note are optional and come out regular (the automatic-tag problem is connector-only).
+
+- Get `PARENTKEY` with `find LIB QUERY`; it must be a regular item, not an attachment or note (`attach --item` refuses those, and notes are not meant to nest).
+- Several notes (on different parents too) go in ONE array: one dialog, max 50.
+- No dedupe. `write` creates whatever it is given, so running it twice makes two notes. First run `notes LIB PARENTKEY...` (read-only; `--full` for whole texts) and do not add a note that is already there.
+- `write` prints the key of each object it created; check with `notes LIB PARENTKEY`. To remove a mistaken note, `trash LIB NOTEKEY`.
+- Same mechanism as `attach --item`, which creates its attachment as a child the same way.
+
 ## Write commands and the modal
 
 | Command | Path | Zotero dialog |
@@ -85,6 +101,6 @@ The library is a human's working space; write what a human would write by hand.
 | `attach LIB FILE --new ID` | connector (item + stored file) | none |
 | `attach LIB FILE --item KEY` | local API: create attachment, upload file | 3 (one per request) |
 | `trash LIB KEY...` | local API (`deleted:1`, reversible) | 1 per request |
-| `write LIB FILE.json` | local API: array of `{key, version, ...fields}` | 1 per request (max 50 objects) |
+| `write LIB FILE.json` | local API: array of `{key, version, ...fields}` to update, or new objects without `key` to create | 1 per request (max 50 objects) |
 
-The dialog is the user's review gate and the key is single-use: put related edits in ONE request and say how many dialogs to expect; never loop single-item writes. Moving an item to another collection: `write` `[{"key":"K","version":12,"collections":["C1","C2"]}]` (replaces membership; read current `collections` first). Raw reads: `curl -s -H 'Zotero-API-Version: 3' localhost:23119/api/groups/<ID>/collections/<KEY>/items/top` (user library: `/api/users/0/...`).
+The dialog is the user's review gate and the key is single-use: put related edits in ONE request and say how many dialogs to expect; never loop single-item writes. Moving an item to another collection: `write` `[{"key":"K","version":12,"collections":["C1","C2"]}]` (replaces membership; read current `collections` first).

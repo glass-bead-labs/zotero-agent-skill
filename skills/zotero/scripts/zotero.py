@@ -6,7 +6,7 @@ Stdlib only. Talks to Zotero on 127.0.0.1:23119:
   * /connector/...  browser-connector endpoints; `import` uses these (items, child notes, PDFs; no dialog)
 
 Read-only (GET to 127.0.0.1 only; enforced at runtime, see GUARD):
-    status | libs | colls LIB | ls LIB [COLL] | find LIB QUERY | path LIB (ITEM... | --coll COLL) | plan SPEC | where [SPEC] | selftest
+    status | libs | colls LIB | ls LIB [COLL] | find LIB QUERY | notes LIB ITEM... | path LIB (ITEM... | --coll COLL) | plan SPEC | where [SPEC] | selftest
 Network read, one local file (GET only, to Zotero + Crossref/arXiv/OpenAlex; enforced at runtime, see GUARD):
     verify SPEC        resolves identifiers; writes one output file (location: resolved_for()); never touches
                        Zotero. plan/import/organize take the same SPEC; `where SPEC` prints the location.
@@ -37,7 +37,7 @@ SIM_OK = 0.85
 GUARD = None
 LOCAL_ONLY = (HOST + "/",)
 REMOTE_READ = LOCAL_ONLY + ("https://api.crossref.org/", "https://export.arxiv.org/", "https://api.openalex.org/")
-READ_ONLY_CMDS = {"status", "libs", "colls", "ls", "find", "path", "plan", "where", "selftest"}  # GUARD = LOCAL_ONLY
+READ_ONLY_CMDS = {"status", "libs", "colls", "ls", "find", "notes", "path", "plan", "where", "selftest"}  # GUARD = LOCAL_ONLY
 VERIFY_CMDS = {"verify"}                                                                  # GUARD = REMOTE_READ
 
 
@@ -368,6 +368,31 @@ def cmd_find(a):
         print("%s  %s | %s | %s" % (i["key"], d.get("itemType"), d.get("title", "")[:70], d.get("DOI", "")))
 
 
+def cmd_notes(a):
+    """Child notes of each ITEM (key, dates, tags, text); an ITEM that is itself a note is shown as is. Use before adding
+    a note with `write`, which does not dedupe."""
+    lp = lib_path(a.lib)
+    n = 0
+    for k in a.items:
+        try:
+            item, _ = zget(lp + "/items/" + k, include="data")
+            d = item["data"]
+            notes = [item] if d.get("itemType") == "note" else zget(lp + "/items/%s/children" % k, itemType="note", include="data")[0]
+        except urllib.error.HTTPError as e:
+            sys.exit("No item %s in %s (HTTP %d)" % (k, a.lib, e.code))
+        if d.get("itemType") != "note":
+            print("%s  %s" % (k, (d.get("title") or "")[:70]))
+        for i in notes:
+            d = i["data"]
+            text = clean(d.get("note", ""))
+            n += 1
+            print("  note %s | parent %s | added %s | modified %s | tags: %s%s" % (
+                i["key"], d.get("parentItem", "-"), d.get("dateAdded", "")[:10], d.get("dateModified", "")[:10],
+                ", ".join(t["tag"] for t in d.get("tags", [])) or "-", " | in trash" if d.get("deleted") else ""))
+            print("    " + (text if a.full else text[:200] + ("..." if len(text) > 200 else "")))
+    print("-- %d notes" % n)
+
+
 def cmd_path(a):
     """Local file path of each attachment of the ITEMs (an ITEM that is itself an attachment counts as one), or of
     every attachment in collection --coll (not recursive, like `ls`).
@@ -589,6 +614,8 @@ def cmd_trash(a):
 def cmd_write(a):
     r = local_write(a.lib, json.load(open(a.json)), kind="collections" if a.collections else "items")
     print("successful: %d | unchanged: %d | failed: %d" % (len(r.get("successful", {})), len(r.get("unchanged", {})), len(r.get("failed", {}))))
+    for i, v in sorted((r.get("successful") or {}).items(), key=lambda kv: int(kv[0])):
+        print("  object %s -> %s" % (i, v.get("key")))
     for k, v in (r.get("failed") or {}).items():
         print("  failed %s: %s" % (k, v))
 
@@ -972,6 +999,9 @@ def main():
     s = sp.add_parser("colls"); s.add_argument("lib"); s.set_defaults(f=cmd_colls)
     s = sp.add_parser("ls"); s.add_argument("lib"); s.add_argument("coll", nargs="?"); s.set_defaults(f=cmd_ls)
     s = sp.add_parser("find"); s.add_argument("lib"); s.add_argument("query"); s.set_defaults(f=cmd_find)
+    s = sp.add_parser("notes", help="child notes of the ITEMs (key, dates, tags, text); check before adding one with `write`")
+    s.add_argument("lib"); s.add_argument("items", nargs="+", metavar="ITEM"); s.add_argument("--full", action="store_true", help="whole note text, not 200 chars")
+    s.set_defaults(f=cmd_notes)
     s = sp.add_parser("path", help="local file path(s) of attachments: of the ITEMs (parent or attachment keys), or of all in --coll; flags missing files")
     s.add_argument("lib"); s.add_argument("items", nargs="*", metavar="ITEM"); s.add_argument("--coll", help="every attachment in this collection instead of ITEMs")
     s.set_defaults(f=cmd_path)
