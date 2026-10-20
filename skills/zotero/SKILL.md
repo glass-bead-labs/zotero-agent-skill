@@ -16,6 +16,15 @@ One stdlib-only CLI, `scripts/zotero.py`, against the running desktop app on `12
 
 Whenever possible, PDFs (or other formats such as docx, pptx, ...) should be attached to the reference. Conversely, always start by checking for attachments and read these when content is needed: `path LIB ITEM...` (parent or attachment keys) or `path LIB --coll COLL` (every attachment in the collection, not its subcollections) prints one row per attachment: `ok|missing|nofile`, parent key, attachment key, content type, path. Read the `ok` paths. `missing`: not on this machine. `nofile`: web link. If none are `ok`, report that to the user.
 
+## Attaching a local file
+
+You already have a PDF (or docx, ...) on disk and want it in Zotero: `attach LIB FILE (--item KEY | --new ID)`. Not pre-approved (it writes).
+
+- `--new DOI_OR_ARXIV_ID [--coll COLL]`: one call creates the item (metadata from Crossref/arXiv, never typed) and stores a copy of the file as its PDF. No Zotero dialog. Refuses if the ID is already in the library and prints how to find its key; use `--item` then.
+- `--item KEY`: stores a copy as a new child attachment of an existing item (`find LIB QUERY` for the key). Three Allow dialogs (create the attachment, authorize the upload, register it): say so first. If it fails midway, the empty attachment item is named in the error; re-run or `trash` it.
+- Both: `--title` (default "Full Text PDF", or the file name for non-PDFs), `--max-mb` (default 50). Group-library files count against the group owner's quota. Check with `path LIB KEY`.
+- Not for several items at once: `--new` only takes the identifier and file. For many, or notes/tags/subcollections, use a spec with `pdf` (a URL) and `import`.
+
 ## Workflow: references -> collection
 
 1. Spec JSON (`references/spec-example.json`): per entry `id`, `claimed`, optional `notes` (HTML), `tags`, `subcollection`, `pdf`, or `manual` + `user_affirmed`; `standalone_notes`; `tags` (all entries); `tag_type`.
@@ -42,7 +51,7 @@ This safety is defended in depth (Zotero's own docs, the script's runtime guard,
 
 `verify SPEC` is not read-only, but it is bounded the same way: the runtime guard allows only HTTP GET to Zotero, `api.crossref.org`, `export.arxiv.org` and `api.openalex.org` (redirects included); it sends only the DOI/arXiv identifiers (never titles or notes); it only pings Zotero (to check the version) and never reads or changes the library; and its one write is its output file, in the private temp directory described in the Verify step. `selftest` proves the guard.
 
-Deliberately not pre-approved: `import`, `organize`, `trash`, `write`.
+Deliberately not pre-approved: `import`, `organize`, `attach`, `trash`, `write`.
 
 ## The rule: never type bibliographic metadata
 
@@ -73,6 +82,8 @@ The library is a human's working space; write what a human would write by hand.
 | --- | --- | --- |
 | `import` | connector (items, notes, PDFs); then `organize` | none for the import; then as `organize` |
 | `organize SPEC [--dry-run]` | local API: create subcollections, set regular tags, move items | 1 to create subcollections + 1 per 50 items |
+| `attach LIB FILE --new ID` | connector (item + stored file) | none |
+| `attach LIB FILE --item KEY` | local API: create attachment, upload file | 3 (one per request) |
 | `trash LIB KEY...` | local API (`deleted:1`, reversible) | 1 per request |
 | `write LIB FILE.json` | local API: array of `{key, version, ...fields}` | 1 per request (max 50 objects) |
 

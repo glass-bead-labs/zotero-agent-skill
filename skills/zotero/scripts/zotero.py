@@ -14,13 +14,16 @@ Not read-only:
     import SPEC        writes items/notes/PDFs through the connector (no dialog), then runs `organize`
     organize SPEC      regular tags + subcollection placement (local-API writes: one dialog to create
                        subcollections, then one per 50 items); idempotent, also fixes earlier imports
+    attach LIB FILE (--item KEY | --new ID)
+                       local file -> existing item (local-API upload: 3 approval dialogs) or new item resolved
+                       from a DOI/arXiv ID (connector: no dialog), in one call
     trash | write      local-API writes (one approval dialog per request)
 
 Design rule: the model never types bibliographic metadata. It supplies identifiers
 (DOI / arXiv ID); metadata comes from Crossref / arXiv and is compared with what the
 source document claimed before anything is written.
 """
-import argparse, difflib, hashlib, html, json, os, re, stat, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
+import argparse, difflib, hashlib, html, json, mimetypes, os, re, stat, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
 import xml.etree.ElementTree as ET
 
 HOST = os.environ.get("ZOTERO_HOST", "http://127.0.0.1:23119")
@@ -440,21 +443,137 @@ def library_tags(lp):
             return names
 
 
+def local_authorize():
+    """Ask the user to approve ONE write request. Returns the headers for it (the key is single-use)."""
+    _, hdr = http(HOST + "/api/", headers={"Zotero-API-Version": "3"}, raw=True)
+    sid = hdr["Zotero-Server-ID"]
+    print("Zotero will show an approval dialog - click Allow in the Zotero window (waiting up to 3 min)...", file=sys.stderr)
+    body = http(HOST + "/api/local/authorize", data=json.dumps({"appName": "zotero skill"}).encode(), method="POST", timeout=180,
+                headers={"Zotero-API-Version": "3", "Zotero-Server-ID": sid, "Content-Type": "application/json"})
+    return {"Zotero-API-Version": "3", "Zotero-Server-ID": sid, "Zotero-API-Key": json.loads(body)["key"]}
+
+
 def local_write(lib, items, kind="items"):
     """Batch-write objects ([{key, version, ...fields}]) to /items (or /collections) via the local API.
 
     Zotero asks the user to approve every write request (the key from /api/local/authorize is
     single-use), so always send ONE request holding as many objects as possible (max 50)."""
     lp = lib_path(lib)
-    _, hdr = http(HOST + "/api/", headers={"Zotero-API-Version": "3"}, raw=True)
-    sid = hdr["Zotero-Server-ID"]
-    print("Zotero will show an approval dialog - click Allow in the Zotero window (waiting up to 3 min)...", file=sys.stderr)
-    body = http(HOST + "/api/local/authorize", data=json.dumps({"appName": "zotero skill"}).encode(), method="POST", timeout=180,
-                headers={"Zotero-API-Version": "3", "Zotero-Server-ID": sid, "Content-Type": "application/json"})
-    key = json.loads(body)["key"]
-    out = http(HOST + "/api" + lp + "/" + kind, data=json.dumps(items).encode(), method="POST",
-               headers={"Zotero-API-Version": "3", "Zotero-Server-ID": sid, "Zotero-API-Key": key, "Content-Type": "application/json"})
+    h = local_authorize()
+    h["Content-Type"] = "application/json"
+    out = http(HOST + "/api" + lp + "/" + kind, data=json.dumps(items).encode(), method="POST", headers=h)
     return json.loads(out)
+
+
+def read_local_file(path, max_mb):
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(path):
+        sys.exit("No such file: %s" % path)
+    if os.path.getsize(path) > max_mb * 1e6:
+        sys.exit("%s is %.0f MB, over --max-mb %d" % (path, os.path.getsize(path) / 1e6, max_mb))
+    with open(path, "rb") as f:
+        body = f.read()
+    ctype = "application/pdf" if body[:5] == b"%PDF-" else mimetypes.guess_type(path)[0] or "application/octet-stream"
+    if path.lower().endswith(".pdf") and ctype != "application/pdf":
+        sys.exit("%s is named .pdf but is not a PDF (no %%PDF- header)" % path)
+    return path, body, ctype
+
+
+def attach_existing(lib, key, path, body, ctype, title):
+    """Store a copy of the file as a new child attachment of item KEY, using the Web API's file-upload protocol that
+    Zotero 10 serves locally. Each of the three write requests needs its own approval click:
+    (1) create the attachment item, (2) authorize the upload, (3) register it. The bytes go to a staging URL
+    that needs no approval."""
+    lp = lib_path(lib)
+    try:
+        parent, _ = zget(lp + "/items/" + key, include="data")
+    except urllib.error.HTTPError as e:
+        sys.exit("No item %s in %s (HTTP %d)" % (key, lib, e.code))
+    pd = parent["data"]
+    if pd.get("itemType") in ("attachment", "note"):
+        sys.exit("%s is a%s %s; give the parent item's key" % (key, "n" if pd["itemType"] == "attachment" else "", pd["itemType"]))
+    if pd.get("deleted"):
+        sys.exit("%s is in the trash" % key)
+    name = os.path.basename(path)
+    md5 = hashlib.md5(body).hexdigest()
+    mtime = int(os.path.getmtime(path) * 1000)
+
+    print("1/3 create attachment item under %s (%s)" % (key, (pd.get("title") or "")[:60]), flush=True)
+    r = local_write(lib, [{"itemType": "attachment", "linkMode": "imported_file", "parentItem": key, "title": title,
+                           "contentType": ctype, "filename": name, "tags": [], "relations": {}}])
+    if not r.get("success"):
+        sys.exit("could not create the attachment item: %s" % json.dumps(r.get("failed")))
+    akey = r["success"]["0"]
+
+    def finish(msg):
+        sys.exit("%s\nThe empty attachment item %s remains under %s: re-run, or `trash %s %s`." % (msg, akey, key, lib, akey))
+
+    print("2/3 authorize upload of %s (%.0f KB)" % (name, len(body) / 1024), flush=True)
+    h = local_authorize()
+    h.update({"Content-Type": "application/x-www-form-urlencoded", "If-None-Match": "*"})
+    form = urllib.parse.urlencode({"md5": md5, "filename": name, "filesize": len(body), "mtime": mtime}).encode()
+    try:
+        auth = json.loads(http(HOST + "/api%s/items/%s/file" % (lp, akey), data=form, method="POST", headers=h))
+    except urllib.error.HTTPError as e:
+        finish("upload authorization failed (HTTP %d: %s)" % (e.code, e.read().decode(errors="replace")[:200]))
+    if auth.get("exists"):
+        finish("Zotero reports this file already exists for the new item (unexpected)")
+    # prefix + bytes + suffix is the Web API's S3 body convention; locally both are empty
+    try:
+        http(auth["url"], data=auth.get("prefix", "").encode() + body + auth.get("suffix", "").encode(), method="POST",
+             headers={"Content-Type": auth.get("contentType") or ctype}, timeout=180)
+    except urllib.error.HTTPError as e:
+        finish("upload failed (HTTP %d: %s)" % (e.code, e.read().decode(errors="replace")[:200]))
+
+    print("3/3 register upload", flush=True)
+    h = local_authorize()
+    h.update({"Content-Type": "application/x-www-form-urlencoded", "If-None-Match": "*"})
+    try:
+        http(HOST + "/api%s/items/%s/file" % (lp, akey), data=urllib.parse.urlencode({"upload": auth["uploadKey"]}).encode(),
+             method="POST", headers=h)
+    except urllib.error.HTTPError as e:
+        finish("registering the upload failed (HTTP %d: %s)" % (e.code, e.read().decode(errors="replace")[:200]))
+    return akey
+
+
+def attach_new(lib, coll, ident, path, body, ctype, title):
+    """Create a top-level item from a DOI/arXiv ID (metadata from Crossref/arXiv, never typed) and attach the local
+    file to it, through the connector in one session: no approval dialog."""
+    lp = lib_path(lib)
+    item, err = arxiv(ident.split(":", 1)[1]) if ident.lower().startswith("arxiv:") else crossref(ident)
+    if item is None:
+        sys.exit("%s did not resolve: %s" % (ident, err))
+    ids, _, _ = library_index(lp)
+    for v in (item.get("DOI", "").lower(), ident.lower()):
+        if v and v in ids:
+            sys.exit("%s is already in %s (`find %s \"%s\"` for its key); use --item KEY to attach the file to it" % (ident, lib, lib, v))
+    target, tname = connector_target(lib, coll)
+    session = "zskill-%d" % int(time.time())
+    item = dict(item, id="i1", tags=[], notes=[], attachments=[])
+    print("new item: %s | %s" % ((item.get("title") or "")[:70], "; ".join(c.get("lastName", "") for c in item.get("creators", [])[:3])))
+    connector("saveItems", {"sessionID": session, "uri": "http://localhost/zotero-skill", "items": [item]})
+    connector("updateSession", {"sessionID": session, "target": target, "tags": ""})
+    # a bare file name as `url`: Zotero uses it to name the file, and a local path must not end up in the (synced) record
+    meta = {"id": "ai1", "url": os.path.basename(path), "contentType": ctype, "parentItemID": "i1",
+            "title": title, "sessionID": session}
+    connector("saveAttachment", headers={"Content-Type": ctype, "X-Metadata": json.dumps(meta)}, data=body)
+    return tname
+
+
+def cmd_attach(a):
+    """Attach a local file (PDF, or e.g. docx) to an existing item, or to a new item created from an identifier."""
+    if bool(a.item) == bool(a.new):
+        sys.exit("usage: attach LIB FILE --item KEY  |  attach LIB FILE --new DOI_OR_ARXIV_ID [--coll COLL]")
+    if a.coll and not a.new:
+        sys.exit("--coll only applies to --new (an existing item keeps its collections)")
+    path, body, ctype = read_local_file(a.file, a.max_mb)
+    title = a.title or ("Full Text PDF" if ctype == "application/pdf" else os.path.basename(path))
+    if a.item:
+        k = attach_existing(a.lib, a.item, path, body, ctype, title)
+        print("attached %s (%.0f KB) to %s as attachment %s" % (os.path.basename(path), len(body) / 1024, a.item, k))
+    else:
+        t = attach_new(a.lib, a.coll, a.new, path, body, ctype, title)
+        print("created %s and attached %s (%.0f KB) -> %s" % (a.new, os.path.basename(path), len(body) / 1024, t))
 
 
 def cmd_trash(a):
@@ -867,6 +986,11 @@ def main():
     s = sp.add_parser("organize", help="set tags as regular tags and place items into subcollections for items already imported (local-API writes)")
     s.add_argument("spec"); s.add_argument("--dry-run", action="store_true", help="show the changes, write nothing")
     s.set_defaults(f=cmd_organize)
+    s = sp.add_parser("attach", help="attach a local file to an existing item (--item KEY; 3 approval dialogs) or to a new item made from a DOI/arXiv ID (--new ID; no dialog)")
+    s.add_argument("lib"); s.add_argument("file")
+    s.add_argument("--item", help="key of the existing parent item"); s.add_argument("--new", metavar="ID", help="DOI or arXiv:ID of a new item to create")
+    s.add_argument("--coll", help="with --new: collection to put it in (default: library root)"); s.add_argument("--title", help="attachment title (default: Full Text PDF / file name)")
+    s.add_argument("--max-mb", type=int, default=50); s.set_defaults(f=cmd_attach)
     s = sp.add_parser("trash", help="move items to Zotero's trash (one approval dialog)"); s.add_argument("lib"); s.add_argument("keys", nargs="+"); s.set_defaults(f=cmd_trash)
     s = sp.add_parser("write", help="POST a JSON array of item (or --collections) objects via the local API (one approval dialog)"); s.add_argument("lib"); s.add_argument("json")
     s.add_argument("--collections", action="store_true", help="the objects are collections ({key, version, name, ...}), not items")
