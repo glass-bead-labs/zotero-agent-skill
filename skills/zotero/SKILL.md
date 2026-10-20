@@ -3,7 +3,7 @@ name: zotero
 description: |
   Read and organize the user's local Zotero 10 library, and import references into a specific library or collection with child notes, native tags and PDFs, after verifying every DOI/arXiv ID against Crossref/arXiv. Use whenever the user mentions Zotero, a Zotero collection or group library, adding papers by DOI or arXiv ID, putting a bibliography/reading list/annotations into Zotero, or moving, tagging or trashing items. Always use it when turning an AI-written or pasted bibliography into Zotero entries, because LLM-generated DOIs are often wrong.
 compatibility: Zotero 10+ desktop app running locally with Settings > Advanced > "Allow other applications on this computer to communicate with Zotero" ticked. python3 (stdlib only).
-allowed-tools: Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py status) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py libs) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py selftest) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py colls *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py ls *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py find *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py plan *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py where) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py where *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py verify *)
+allowed-tools: Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py status) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py libs) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py selftest) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py colls *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py ls *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py find *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py path *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py plan *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py where) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py where *) Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py verify *)
 ---
 
 # Zotero (10+, local API)
@@ -11,6 +11,10 @@ allowed-tools: Bash(python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py status) Bas
 Scope. This skill is not for doing research. It fetches from and updates Zotero. The assumption is that if you are entering new references, you have already identified them, outside the scope of this skill (ideally with a DOI or arXiv ID in hand). `verify` fetches the metadata from Crossref/arXiv and checks it matches the claim, and comes after identifying references.
 
 One stdlib-only CLI, `scripts/zotero.py`, against the running desktop app on `127.0.0.1:23119`. No API key, no cloud, no MCP. Run it as `python3 -I ${CLAUDE_SKILL_DIR}/scripts/zotero.py <command>` (if the variable is not expanded, use this skill's directory).
+
+## General guidelines
+
+Whenever possible, PDFs (or other formats such as docx, pptx, ...) should be attached to the reference. Conversely, always start by checking for attachments and read these when content is needed: `path LIB ITEM...` (parent or attachment keys) or `path LIB --coll COLL` (every attachment in the collection, not its subcollections) prints one row per attachment: `ok|missing|nofile`, parent key, attachment key, content type, path. Read the `ok` paths. `missing`: not on this machine. `nofile`: web link. If none are `ok`, report that to the user.
 
 ## Workflow: references -> collection
 
@@ -28,9 +32,9 @@ If something fails or looks odd (ID mapping, 429s, dedupe, subcollection lookups
 
 ### Read-only
 
-`status`, `libs`, `colls LIB`, `ls LIB [COLL]`, `find LIB QUERY`, `plan SPEC`, `where [SPEC]`, `selftest`.
+`status`, `libs`, `colls LIB`, `ls LIB [COLL]`, `find LIB QUERY`, `path LIB (ITEM... | --coll COLL)`, `plan SPEC`, `where [SPEC]`, `selftest`.
 
-They only issue HTTP GET to `127.0.0.1:23119` (`/connector/ping`, `/api/users/0/groups`, `/api/<lib>/collections`, `.../items`, `.../items/top`, `.../tags`) and, for `plan`, read the verify output of the spec named on the command line (a file in the private temp directory; see the Verify step). They send no data anywhere else and create, modify or delete nothing in Zotero or on disk. `plan` is the dry run of `import`: it computes what `import` would send (new items, notes, tags, skipped duplicates) and stops. `where` only lists or prints paths in that temp directory.
+They only issue HTTP GET to `127.0.0.1:23119` (`/connector/ping`, `/api/users/0/groups`, `/api/<lib>/collections`, `.../items`, `.../items/top`, `.../items/<KEY>/children`, `.../collections/<KEY>/items`, `.../items/<KEY>/file/view/url`, `.../tags`) and, for `plan`, read the verify output of the spec named on the command line (a file in the private temp directory; see the Verify step). They send no data anywhere else and create, modify or delete nothing in Zotero or on disk. `plan` is the dry run of `import`: it computes what `import` would send (new items, notes, tags, skipped duplicates) and stops. `where` only lists or prints paths in that temp directory.
 
 This safety is defended in depth (Zotero's own docs, the script's runtime guard, reading the code); the argument and how to check it yourself: `references/read-only-safety.md`. `selftest` proves the guard without Zotero.
 

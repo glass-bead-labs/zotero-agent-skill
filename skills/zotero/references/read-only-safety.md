@@ -1,6 +1,6 @@
 # Why the read-only commands are read-only
 
-`SKILL.md` lists the commands pre-approved in `allowed-tools` (`status`, `libs`, `colls`, `ls`, `find`, `plan`, `where`, `selftest`) and states that they only issue HTTP GET to `127.0.0.1:23119` and create, modify or delete nothing. This page is the argument for that, so it can be checked rather than trusted. It also covers `verify`, which is pre-approved with a wider but still bounded guard (see the end).
+`SKILL.md` lists the commands pre-approved in `allowed-tools` (`status`, `libs`, `colls`, `ls`, `find`, `path`, `plan`, `where`, `selftest`) and states that they only issue HTTP GET to `127.0.0.1:23119` and create, modify or delete nothing. This page is the argument for that, so it can be checked rather than trusted. It also covers `verify`, which is pre-approved with a wider but still bounded guard (see the end).
 
 This safety is defended in depth:
 

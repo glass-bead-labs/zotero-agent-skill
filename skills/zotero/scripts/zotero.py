@@ -6,7 +6,7 @@ Stdlib only. Talks to Zotero on 127.0.0.1:23119:
   * /connector/...  browser-connector endpoints; `import` uses these (items, child notes, PDFs; no dialog)
 
 Read-only (GET to 127.0.0.1 only; enforced at runtime, see GUARD):
-    status | libs | colls LIB | ls LIB [COLL] | find LIB QUERY | plan SPEC | where [SPEC] | selftest
+    status | libs | colls LIB | ls LIB [COLL] | find LIB QUERY | path LIB (ITEM... | --coll COLL) | plan SPEC | where [SPEC] | selftest
 Network read, one local file (GET only, to Zotero + Crossref/arXiv/OpenAlex; enforced at runtime, see GUARD):
     verify SPEC        resolves identifiers; writes one output file (location: resolved_for()); never touches
                        Zotero. plan/import/organize take the same SPEC; `where SPEC` prints the location.
@@ -34,7 +34,7 @@ SIM_OK = 0.85
 GUARD = None
 LOCAL_ONLY = (HOST + "/",)
 REMOTE_READ = LOCAL_ONLY + ("https://api.crossref.org/", "https://export.arxiv.org/", "https://api.openalex.org/")
-READ_ONLY_CMDS = {"status", "libs", "colls", "ls", "find", "plan", "where", "selftest"}  # GUARD = LOCAL_ONLY
+READ_ONLY_CMDS = {"status", "libs", "colls", "ls", "find", "path", "plan", "where", "selftest"}  # GUARD = LOCAL_ONLY
 VERIFY_CMDS = {"verify"}                                                                  # GUARD = REMOTE_READ
 
 
@@ -365,6 +365,47 @@ def cmd_find(a):
         print("%s  %s | %s | %s" % (i["key"], d.get("itemType"), d.get("title", "")[:70], d.get("DOI", "")))
 
 
+def cmd_path(a):
+    """Local file path of each attachment of the ITEMs (an ITEM that is itself an attachment counts as one), or of
+    every attachment in collection --coll (not recursive, like `ls`).
+
+    Uses /file/view/url (200, URL in the body); /file and /file/view answer 302 to file://, which the guard refuses.
+    Zotero returns that URL even when nothing is on disk, so existence is checked here."""
+    if bool(a.items) == bool(a.coll):
+        sys.exit("usage: path LIB ITEM [ITEM...]  |  path LIB --coll COLL")
+    lp = lib_path(a.lib)
+    atts = []
+    if a.coll:
+        start = 0
+        while True:  # one list covers child attachments and standalone ones
+            page, hdr = zget(lp + "/collections/%s/items" % collection_key(lp, a.coll), itemType="attachment", limit=100, start=start, include="data")
+            atts += page
+            start += len(page)
+            if not page or start >= int(hdr.get("Total-Results", start)):
+                break
+    for k in a.items:
+        try:
+            item, _ = zget(lp + "/items/" + k, include="data")
+            atts += [item] if item["data"].get("itemType") == "attachment" else \
+                zget(lp + "/items/%s/children" % k, itemType="attachment", include="data")[0]
+        except urllib.error.HTTPError as e:
+            sys.exit("No item %s in %s (HTTP %d)" % (k, a.lib, e.code))
+    found = 0
+    for i in atts:
+        d = i["data"]
+        row = [d.get("parentItem", "-"), i["key"], d.get("contentType", "")]
+        try:
+            url = http(HOST + "/api" + lp + "/items/%s/file/view/url" % i["key"], headers={"Zotero-API-Version": "3"}).decode().strip()
+        except urllib.error.HTTPError:  # 400 "Not a file attachment": a web link
+            print("\t".join(["nofile"] + row + [d.get("url", "")]))
+            continue
+        path = urllib.request.url2pathname(urllib.parse.urlparse(url).path)
+        ok = os.path.isfile(path)
+        found += ok
+        print("\t".join(["ok" if ok else "missing"] + row + [path]))
+    print("-- %d attachments, %d on disk" % (len(atts), found))
+
+
 def note_present(html_note, existing_texts, threshold=0.8):
     """True if a (possibly human-edited) top-level note resembling this one already exists."""
     mine = norm(clean(html_note)[:600])
@@ -655,7 +696,10 @@ def organize(spec, entries, note_htmls, dry=False):
             for n in missing:
                 subs[n.lower()] = "NEW:" + n
         else:
-            r = local_write(spec["library"], [{"name": n, "parentCollection": parent} for n in missing], kind="collections")
+            try:
+                r = local_write(spec["library"], [{"name": n, "parentCollection": parent} for n in missing], kind="collections")
+            except TimeoutError:
+                sys.exit("subcollections NOT created (no approval within 3 min); run `organize` again")
             made = r.get("success") or {k: v["key"] for k, v in r.get("successful", {}).items()}
             if len(made) != len(missing):
                 sys.exit("could not create all subcollections: %s" % json.dumps(r.get("failed")))
@@ -734,8 +778,9 @@ def organize(spec, entries, note_htmls, dry=False):
             print("  batch %d: updated %d, failed %d" % (i // 50 + 1, len(r.get("successful", {})), len(r.get("failed", {}))))
             for k, v in (r.get("failed") or {}).items():
                 print("    failed:", v)
-        except urllib.error.HTTPError as ex:
-            print("  batch %d NOT applied (HTTP %d: approval denied or expired); run `organize` again later" % (i // 50 + 1, ex.code))
+        except (urllib.error.HTTPError, TimeoutError) as ex:  # no click within local_write's 3 min is a TimeoutError
+            why = "no approval within 3 min" if isinstance(ex, TimeoutError) else "HTTP %d: approval denied or expired" % ex.code
+            print("  batch %d NOT applied (%s); run `organize` again later" % (i // 50 + 1, why))
             break
 
 
@@ -808,6 +853,9 @@ def main():
     s = sp.add_parser("colls"); s.add_argument("lib"); s.set_defaults(f=cmd_colls)
     s = sp.add_parser("ls"); s.add_argument("lib"); s.add_argument("coll", nargs="?"); s.set_defaults(f=cmd_ls)
     s = sp.add_parser("find"); s.add_argument("lib"); s.add_argument("query"); s.set_defaults(f=cmd_find)
+    s = sp.add_parser("path", help="local file path(s) of attachments: of the ITEMs (parent or attachment keys), or of all in --coll; flags missing files")
+    s.add_argument("lib"); s.add_argument("items", nargs="*", metavar="ITEM"); s.add_argument("--coll", help="every attachment in this collection instead of ITEMs")
+    s.set_defaults(f=cmd_path)
     s = sp.add_parser("verify", help="resolve IDs via Crossref/arXiv; output goes to a private temp dir (see `where SPEC`)")
     s.add_argument("spec")
     s.add_argument("--no-pdf", action="store_true"); s.set_defaults(f=cmd_verify)
